@@ -1,0 +1,7 @@
+defaults:
+  - gripper: franka_hand
+  - _self_
+
+ip: localhost
+port: 50052
+timeout: 15

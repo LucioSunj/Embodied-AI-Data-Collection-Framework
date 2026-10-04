@@ -1,0 +1,2 @@
+[console_scripts]
+launch_robot.py = polymetis.cli:main

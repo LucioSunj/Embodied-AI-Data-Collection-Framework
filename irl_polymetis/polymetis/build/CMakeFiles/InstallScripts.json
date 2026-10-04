@@ -1,0 +1,9 @@
+{
+	"InstallScripts" : 
+	[
+		"/home/lsk/irl_polymetis/polymetis/build/cmake_install.cmake",
+		"/home/lsk/irl_polymetis/polymetis/build/torch_isolation/cmake_install.cmake",
+		"/home/lsk/irl_polymetis/polymetis/build/torch_isolation/pinocchio_isolation/cmake_install.cmake"
+	],
+	"Parallel" : false
+}

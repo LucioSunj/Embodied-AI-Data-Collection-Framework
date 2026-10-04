@@ -1,0 +1,220 @@
+import pygame
+import time
+import torch
+import numpy as np
+import threading
+import grpc  # 必须引入 grpc 以捕获服务器掉线异常
+from polymetis import RobotInterface, GripperInterface
+from scipy.spatial.transform import Rotation as R
+DATA_COLLECTOR = None
+
+def apply_deadzone(val, deadzone=0.15):
+    """带线性重映射的摇杆死区滤波器"""
+    if abs(val) <= deadzone:
+        return 0.0
+    sign = np.sign(val)
+    return sign * (abs(val) - deadzone) / (1.0 - deadzone)
+
+def run_xbox_teleop():
+    print("="*60)
+    print("🎮 正在初始化 Xbox 混合遥操作引擎 (工业抗扭版)...")
+    
+    pygame.init()
+    pygame.joystick.init()
+    if pygame.joystick.get_count() == 0:
+        print("❌ 未检测到手柄！请确保 Xbox 手柄已连接。")
+        return
+        
+    joystick = pygame.joystick.Joystick(0)
+    joystick.init()
+    
+    robot = RobotInterface(ip_address="localhost")
+    gripper = GripperInterface(ip_address="localhost")
+    last_pressed_state = False
+    # 封装一个重启控制器的辅助函数
+    def start_controller():
+        print("🤖 正在激活 Cartesian Impedance 控制器...")
+        robot.start_cartesian_impedance(stiffness=[200, 200, 200, 20, 20, 20], damping_ratio=1.0)
+        time.sleep(1.0)
+        
+    start_controller()
+    def reset_gripper():
+        nonlocal gripper
+        print("\n 重启夹爪")
+        try:
+            gripper = GripperInterface(ip_address="localhost")
+            gripper.homing()
+            print("夹爪恢复，物理限位已重新校准")
+        except Exception as e:
+            print(f"夹爪复苏失败，请检查 launch_gripper.py是否在运行！报错：{e}")
+    current_pos, current_quat = robot.get_ee_pose()
+    target_pos = current_pos.numpy().copy()
+    initial_rotation = R.from_quat(current_quat.numpy())
+    target_euler = initial_rotation.as_euler('zyx', degrees=False)
+    MAX_ROT_VEL = 0.5
+    MAX_VEL = 0.06           
+    DT = 0.01                
+    DEADZONE = 0.15          
+    GRIPPER_MAX_WIDTH = 0.08 
+    GRIPPER_THRESHOLD = 0.002 
+    MAX_STRETCH = 0.03       # 虚拟弹簧最大拉伸极限 (3厘米)
+    
+    last_gripper_width = GRIPPER_MAX_WIDTH
+    LIMITS = {'x': [0.25, 0.75], 'y': [-0.45, 0.45], 'z': [0.10, 0.65]}
+
+    print("\n✨ 系统已就绪！")
+    print("⚠️ 提示：若操作过猛导致掉线，系统将自动重连，不会崩溃！")
+    print("="*60)
+
+    try:
+        while True:
+            loop_start_time = time.time()
+            pygame.event.pump()
+            
+            # 1. 实时读取真实的物理位置
+            real_pos, real_quat = robot.get_ee_pose()
+            real_pos_np = real_pos.numpy()
+            
+            # 2. 读取手柄输入
+            raw_lx = joystick.get_axis(0)
+            raw_ly = joystick.get_axis(1)
+            raw_rx = joystick.get_axis(3)
+            raw_ry = joystick.get_axis(4) 
+            raw_rt = joystick.get_axis(5)
+            
+            vx = apply_deadzone(raw_ly, DEADZONE) 
+            vy = apply_deadzone(raw_lx, DEADZONE) 
+            vz = -apply_deadzone(raw_ry, DEADZONE)
+            rv_yaw = -apply_deadzone(raw_rx, DEADZONE)
+            
+            
+            
+            new_quat_np = R.from_euler('zxy', target_euler).as_quat()
+            target_quat_torch = torch.tensor(new_quat_np, dtype=torch.float32)
+            # 3. 更新虚拟目标点
+            target_pos[0] += vx * MAX_VEL * DT  
+            target_pos[1] += vy * MAX_VEL * DT  
+            target_pos[2] += vz * MAX_VEL * DT  
+            target_euler[0] += rv_yaw * MAX_ROT_VEL * DT
+            new_quat_np = R.from_euler('zyx', target_euler).as_quat()
+            target_quat_torch = torch.tensor(new_quat_np, dtype=torch.float32)
+            target_pos[0] = np.clip(target_pos[0], LIMITS['x'][0], LIMITS['x'][1])
+            target_pos[1] = np.clip(target_pos[1], LIMITS['y'][0], LIMITS['y'][1])
+            target_pos[2] = np.clip(target_pos[2], LIMITS['z'][0], LIMITS['z'][1])
+
+            # ==========================================
+            # 核心修复 1：虚拟狗链 (Virtual Leash) 限幅
+            # ==========================================
+            dist = np.linalg.norm(target_pos - real_pos_np)
+            if dist > MAX_STRETCH:
+                # 强行将目标点往回拽，使其距离物理实体永远不超过 3cm
+                target_pos = real_pos_np + (target_pos - real_pos_np) / dist * MAX_STRETCH
+
+            # 4. 夹爪控制 (异步非阻塞)
+            """ normalized_rt = (raw_rt + 1.0) / 2.0
+            target_width = np.clip(GRIPPER_MAX_WIDTH * (1.0 - normalized_rt), 0.0, GRIPPER_MAX_WIDTH)
+
+            if abs(target_width - last_gripper_width) > GRIPPER_THRESHOLD:
+                def move_gripper_async(width_cmd):
+                    try:
+                        if width_cmd < 0.005:
+                            #gripper.goto(width=0, speed=0.05, force=20.0)
+                            gripper.grasp(width = 0,speed=0.03, force=10.0,epsilon_inner=0.08,epsilon_outer=0.08)
+                        else:
+                            gripper.goto(width=width_cmd, speed=0.1, force=10.0)
+                    except Exception as e:
+                        pass
+                threading.Thread(target=move_gripper_async, args=(target_width,), daemon=True).start()
+                last_gripper_width = target_width """
+            normalized_rt = (raw_rt + 1.0) / 2.0
+            #print(normalized_rt)
+            is_pressed = normalized_rt>0.5
+            #print(last_pressed_state)
+            if is_pressed != last_pressed_state:
+                def move_gripper_task(pressed):
+                    try:
+                        #print(pressed)
+                        if pressed:
+                              print("CLOSE")
+                              gripper.grasp( speed=0.1, force=15.0)
+                              #gripper.goto(width=0, speed=0.05, force=20.0)
+                              print("CLOSE")
+                        else:
+                            gripper.goto(width=GRIPPER_MAX_WIDTH, speed=0.1, force=10.0)
+                            print("OPEN")
+                    except Exception:
+                        pass
+                threading.Thread(target=move_gripper_task, args=(is_pressed,), daemon=True).start()
+                last_pressed_state = is_pressed
+            target_width = 0.0 if is_pressed else GRIPPER_MAX_WIDTH
+             # A. 开始录制: 监听 Start 键 (按钮 7)
+            if joystick.get_button(7): 
+                if DATA_COLLECTOR is not None:
+                    DATA_COLLECTOR.start_episode()
+                    time.sleep(0.3)
+                    
+            # B. 停止录制: 监听 B 键 (按钮 1)
+            if joystick.get_button(1):
+                if DATA_COLLECTOR is not None:
+                    DATA_COLLECTOR.stop_and_save_episode()
+                    time.sleep(0.3)
+            if joystick.get_button(6):
+                if joystick.get_button(7):
+                    break
+                reset_gripper()
+                time.sleep(0.5)
+            # C. 记录当前帧状态
+            if DATA_COLLECTOR is not None and DATA_COLLECTOR.is_recording:
+                # 拼接 8 维目标动作向量: [x, y, z, qx, qy, qz, qw, gripper_width]
+                action_vec = np.concatenate([
+                    target_pos, 
+                    new_quat_np, 
+                    [target_width]
+                ])
+                
+                # 获取机械臂本体真实的关节角度 (7维)
+                #current_qpos = robot.get_robot_state().joint_positions.numpy()
+                current_qpos = np.array(list(robot.get_robot_state().joint_positions))
+                DATA_COLLECTOR.record_robot_step(qpos=current_qpos, action=action_vec)
+            # ==========================================
+            # 核心修复 2：防断联自动重连 (Auto-Recovery)
+            # ==========================================
+            try:
+                robot.update_desired_ee_pose(
+                    position=torch.tensor(target_pos, dtype=torch.float32),
+                    orientation=target_quat_torch  # 保持抓取姿态向下
+                )
+            except grpc.RpcError as e:
+                print("\n💥 检测到硬件保护 (Reflex) 触发，控制器已断开！")
+                print("🔄 正在清除积分误差并自动重启...")
+                
+                # 同步坐标系：彻底消除误差积攒
+                current_pos, current_quat = robot.get_ee_pose()
+                target_pos = current_pos.numpy().copy()
+                target_euler = R.from_quat(current_quat.numpy()).as_euler('zyx', degrees=False)
+                # 重启控制器
+                start_controller()
+                print("✅ 恢复成功，请轻推摇杆继续操作。")
+
+            # 5. 退出与定频机制
+            if joystick.get_button(6):
+                break
+
+            elapsed = time.time() - loop_start_time
+            if DT > elapsed:
+                time.sleep(DT - elapsed)
+
+    except KeyboardInterrupt:
+        print("\n\n🛑 接收到系统中断信号")
+    finally:
+        print("🔌 正在锁定机器人并释放资源...")
+        # 核心修复 3：防止在掉线状态下调用 terminate 导致二次崩溃
+        try:
+            robot.terminate_current_policy()
+        except Exception:
+            pass
+        pygame.quit()
+        print("✅ 安全退出完成。")
+
+if __name__ == "__main__":
+    run_xbox_teleop()

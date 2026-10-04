@@ -1,0 +1,24 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "lite-lerobot-infra"
+version = "0.1.0"
+description = "Lightweight robot data collection infrastructure writing LeRobotDataset episodes."
+requires-python = ">=3.10"
+dependencies = [
+    "numpy>=1.24",
+    "scipy>=1.10",
+    "pygame>=2.5",
+]
+
+[project.optional-dependencies]
+franka = ["torch>=2.1"]
+realsense = ["pyrealsense2"]
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]

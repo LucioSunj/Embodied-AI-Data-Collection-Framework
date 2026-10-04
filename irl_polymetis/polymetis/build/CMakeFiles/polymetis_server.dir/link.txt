@@ -1,0 +1,2 @@
+/usr/bin/ar qc libpolymetis_server.a CMakeFiles/polymetis_server.dir/src/polymetis_server.cpp.o
+/usr/bin/ranlib libpolymetis_server.a

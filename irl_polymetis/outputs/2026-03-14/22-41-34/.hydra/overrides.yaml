@@ -1,0 +1,3 @@
+- robot_client=franka_sim
+- robot_client.gui=false
+- use_real_time=false

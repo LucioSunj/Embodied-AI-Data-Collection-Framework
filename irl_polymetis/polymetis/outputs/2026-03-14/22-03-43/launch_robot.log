@@ -1,0 +1,3 @@
+[2026-03-14 22:03:43,734][__main__][INFO] - Adding /home/lsk/irl_polymetis/polymetis/build to $PATH
+[2026-03-14 22:03:43,734][__main__][INFO] - Starting server
+[2026-03-14 22:03:43,774][__main__][INFO] - Killing subprocess with pid 32652, pgid 32652...

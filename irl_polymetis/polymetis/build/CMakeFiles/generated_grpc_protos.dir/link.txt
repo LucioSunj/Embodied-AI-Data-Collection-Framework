@@ -1,0 +1,2 @@
+/usr/bin/ar qc libgenerated_grpc_protos.a CMakeFiles/generated_grpc_protos.dir/polymetis.pb.cc.o CMakeFiles/generated_grpc_protos.dir/polymetis.grpc.pb.cc.o
+/usr/bin/ranlib libgenerated_grpc_protos.a
